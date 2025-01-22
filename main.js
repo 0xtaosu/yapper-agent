@@ -186,17 +186,13 @@ class TwitterReplyBot {
      * @param {Object} data - webhook推送的数据
      * @returns {Object} 处理后的推文数据
      */
-    extractTweetData(data) {
-        const tweet = data.tweet || {};
-        const user = data.user || {};
-
+    extractTweetData(webhookData) {
         return {
-            timestamp: new Date(tweet.publish_time * 1000).toISOString(),
-            tweetId: tweet.id_str,
-            tweetContent: tweet.text,
-            userName: user.name,
-            userDescription: user.description,
-            eventType: data.push_type
+            timestamp: new Date().toISOString(),
+            tweet_id: webhookData.tweet.tweet_id,
+            tweet_content: webhookData.tweet.text,
+            ai_response: "",
+            is_replied: false
         };
     }
 
@@ -207,33 +203,33 @@ class TwitterReplyBot {
     async processTweet(tweetData) {
         try {
             // 检查是否已处理过该推文
-            if (this.processedTweets.has(tweetData.tweetId)) {
-                console.log(`⏭️ 跳过已处理的推文: ${tweetData.tweetId}`);
+            if (this.processedTweets.has(tweetData.tweet_id)) {
+                console.log(`⏭️ 跳过已处理的推文: ${tweetData.tweet_id}`);
                 return;
             }
 
-            console.log(`\n📝 处理推文: ${tweetData.tweetId}`);
-            console.log(`内容: ${tweetData.tweetContent}`);
+            console.log(`\n📝 处理推文: ${tweetData.tweet_id}`);
+            console.log(`内容: ${tweetData.tweet_content}`);
 
             // 获取 AI 回复
-            const aiResponse = await this.getDeepSeekResponse(tweetData.tweetContent);
+            const aiResponse = await this.getDeepSeekResponse(tweetData.tweet_content);
 
             if (!aiResponse) {
                 throw new Error('生成 AI 回复失败');
             }
 
             // 发送回复
-            await this.sendTweet(aiResponse, tweetData.tweetId);
+            await this.sendTweet(aiResponse, tweetData.tweet_id);
             console.log('✅ 回复发送成功');
 
             // 标记推文为已处理
-            this.processedTweets.add(tweetData.tweetId);
+            this.processedTweets.add(tweetData.tweet_id);
 
             // 保存数据到CSV
             this.saveTweetData({
                 timestamp: tweetData.timestamp,
-                tweetId: tweetData.tweetId,
-                tweetContent: tweetData.tweetContent,
+                tweetId: tweetData.tweet_id,
+                tweetContent: tweetData.tweet_content,
                 aiResponse,
                 isReplied: true
             });
