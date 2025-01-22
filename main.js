@@ -6,8 +6,15 @@ const app = express();
 
 class TwitterReplyBot {
     constructor() {
-        console.log('Initializing Twitter Reply Bot...');
+        console.log('🤖 初始化 Twitter Reply Bot...');
         this.processedTweets = new Set();
+        this.MAX_RETRIES = 3;  // 添加重试次数限制
+        this.RETRY_DELAY = 2000;  // 重试延迟时间（毫秒）
+
+        // 添加回复延迟配置（单位：秒）
+        this.MIN_REPLY_DELAY = 5;  // 最小等待时间
+        this.MAX_REPLY_DELAY = 60; // 最大等待时间
+
         this.initCsvFile();
         this.initWebhook();
     }
@@ -68,33 +75,54 @@ class TwitterReplyBot {
      * @param {string} tweetContent - 需要回复的推文内容
      * @returns {Promise<string|null>} AI 生成的回复或 null（如果发生错误）
      */
-    async getDeepSeekResponse(tweetContent) {
+    async getDeepSeekResponse(tweetContent, retryCount = 0) {
         try {
+            if (retryCount >= this.MAX_RETRIES) {
+                throw new Error('超过最大重试次数');
+            }
+
             console.log('🤖 正在为推文生成 AI 回复:', tweetContent);
             const response = await axios.post('https://api.deepseek.com/v1/chat/completions', {
                 model: "deepseek-chat",
                 messages: [{
                     role: "user",
-                    content: `Please provide a friendly and engaging response to this tweet: "${tweetContent}". 
-                             Keep the response under 280 characters.`
+                    content: `You are a crypto-savvy social media influencer known for witty, engaging responses.
+                             Respond to this tweet in the same language (Chinese or English) it's written in: "${tweetContent}"
+                             
+                             Guidelines:
+                             - Use crypto slang (HODL, FOMO, rekt, etc.) when appropriate
+                             - Keep it fun and memorable, but informative
+                             - Include emojis strategically
+                             - Make complex concepts simple and relatable
+                             - Encourage engagement through humor or thought-provoking insights
+                             - Stay under 280 characters
+                             - Match the tweet's language (Chinese/English)
+                             
+                             Make your response so engaging that people can't help but like, retweet, or reply!`
                 }],
-                max_tokens: 150
+                max_tokens: 150,
+                temperature: 0.7  // 添加温度参数以控制创造性
             }, {
                 headers: {
                     'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 10000  // 添加超时设置
             });
 
             const aiResponse = response.data.choices[0].message.content;
             console.log('✨ AI 回复生成成功:', aiResponse);
             return aiResponse;
+
         } catch (error) {
-            console.error('❌ DeepSeek API 错误:', error.message);
-            if (error.response) {
-                console.error('错误详情:', error.response.data);
+            console.error(`❌ DeepSeek API 错误 (尝试 ${retryCount + 1}/${this.MAX_RETRIES}):`, error.message);
+
+            if (error.response?.status === 429 || error.code === 'ECONNRESET') {
+                await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
+                return this.getDeepSeekResponse(tweetContent, retryCount + 1);
             }
-            return null;
+
+            throw error;
         }
     }
 
@@ -104,45 +132,53 @@ class TwitterReplyBot {
      * @param {string|null} replyToId - 要回复的推文 ID
      * @returns {Promise<string>} API 响应结果
      */
-    async sendTweet(text, replyToId = null) {
-        const tweetEndpoint = 'https://api2.apidance.pro/graphql/CreateTweet';
-
-        const payload = {
-            variables: {
-                tweet_text: text,
-                dark_request: false,
-                semantic_annotation_ids: []
-            }
-        };
-
-        if (replyToId) {
-            payload.variables.reply = {
-                in_reply_to_tweet_id: replyToId,
-                exclude_reply_user_ids: []
-            };
-        }
-
-        const headers = {
-            'apikey': process.env.APIDANCE_API_KEY,
-            'AuthToken': process.env.TWITTER_AUTH_TOKEN,
-            'Content-Type': 'application/json'
-        };
-
+    async sendTweet(text, replyToId = null, retryCount = 0) {
         try {
+            if (retryCount >= this.MAX_RETRIES) {
+                throw new Error('超过最大重试次数');
+            }
+
+            const tweetEndpoint = 'https://api2.apidance.pro/graphql/CreateTweet';
+            const payload = {
+                variables: {
+                    tweet_text: text,
+                    dark_request: false,
+                    semantic_annotation_ids: []
+                }
+            };
+
+            if (replyToId) {
+                payload.variables.reply = {
+                    in_reply_to_tweet_id: replyToId,
+                    exclude_reply_user_ids: []
+                };
+            }
+
             const response = await fetch(tweetEndpoint, {
                 method: 'POST',
-                headers: headers,
-                body: JSON.stringify(payload)
+                headers: {
+                    'apikey': process.env.APIDANCE_API_KEY,
+                    'AuthToken': process.env.TWITTER_AUTH_TOKEN,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload),
+                timeout: 10000  // 添加超时设置
             });
 
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
 
-            const result = await response.text();
-            return result;
+            return await response.text();
+
         } catch (error) {
-            console.error('❌ Tweet error:', error);
+            console.error(`❌ Tweet error (尝试 ${retryCount + 1}/${this.MAX_RETRIES}):`, error);
+
+            if (error.response?.status === 429 || error.code === 'ECONNRESET') {
+                await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
+                return this.sendTweet(text, replyToId, retryCount + 1);
+            }
+
             throw error;
         }
     }
@@ -196,13 +232,22 @@ class TwitterReplyBot {
         };
     }
 
+    // 添加随机延迟函数
+    async randomDelay() {
+        const delay = Math.floor(
+            Math.random() * (this.MAX_REPLY_DELAY - this.MIN_REPLY_DELAY + 1) +
+            this.MIN_REPLY_DELAY
+        );
+        console.log(`⏳ 等待 ${delay} 秒后回复...`);
+        await new Promise(resolve => setTimeout(resolve, delay * 1000));
+    }
+
     /**
      * 处理单条推文
      * @param {Object} tweetData - 推文数据
      */
     async processTweet(tweetData) {
         try {
-            // 检查是否已处理过该推文
             if (this.processedTweets.has(tweetData.tweet_id)) {
                 console.log(`⏭️ 跳过已处理的推文: ${tweetData.tweet_id}`);
                 return;
@@ -211,21 +256,34 @@ class TwitterReplyBot {
             console.log(`\n📝 处理推文: ${tweetData.tweet_id}`);
             console.log(`内容: ${tweetData.tweet_content}`);
 
-            // 获取 AI 回复
-            const aiResponse = await this.getDeepSeekResponse(tweetData.tweet_content);
+            // 内容检查
+            if (!tweetData.tweet_content || tweetData.tweet_content.trim().length === 0) {
+                throw new Error('推文内容为空');
+            }
 
+            // 生成 AI 回复
+            const aiResponse = await this.getDeepSeekResponse(tweetData.tweet_content);
             if (!aiResponse) {
                 throw new Error('生成 AI 回复失败');
             }
+
+            // 添加随机延迟
+            await this.randomDelay();
 
             // 发送回复
             await this.sendTweet(aiResponse, tweetData.tweet_id);
             console.log('✅ 回复发送成功');
 
-            // 标记推文为已处理
             this.processedTweets.add(tweetData.tweet_id);
 
-            // 保存数据到CSV
+            // 限制缓存大小
+            if (this.processedTweets.size > 1000) {
+                const iterator = this.processedTweets.values();
+                for (let i = 0; i < 100; i++) {
+                    this.processedTweets.delete(iterator.next().value);
+                }
+            }
+
             this.saveTweetData({
                 timestamp: tweetData.timestamp,
                 tweetId: tweetData.tweet_id,
@@ -236,8 +294,6 @@ class TwitterReplyBot {
 
         } catch (error) {
             console.error('❌ 处理推文失败:', error);
-
-            // 记录失败信息
             this.saveTweetData({
                 ...tweetData,
                 aiResponse: error.message,
