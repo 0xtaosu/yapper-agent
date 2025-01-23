@@ -5,67 +5,208 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
+/**
+ * Twitter Account Class
+ * 处理单个 Twitter 账号的所有操作，包括 AI 回复生成和推文发送
+ */
 class TwitterAccount {
-    constructor(config, commonConfig) {
+    constructor(config, commonConfig, csvPath) {
         this.config = config;
         this.commonConfig = commonConfig;
+        this.csvPath = csvPath;
         this.processedTweets = new Set();
-        console.log(`🤖 初始化 Twitter 账号: ${config.name}`);
+        this.logger = this.initLogger();
+
+        this.logger.info('账号初始化完成');
     }
 
+    /**
+     * 初始化日志记录器
+     */
+    initLogger() {
+        const logPrefix = `[${this.config.name}]`;
+        return {
+            info: (msg, ...args) => console.log(`ℹ️ ${logPrefix} ${msg}`, ...args),
+            error: (msg, ...args) => console.error(`❌ ${logPrefix} ${msg}`, ...args),
+            success: (msg, ...args) => console.log(`✅ ${logPrefix} ${msg}`, ...args),
+            wait: (msg, ...args) => console.log(`⏳ ${logPrefix} ${msg}`, ...args)
+        };
+    }
+
+    /**
+     * 生成 AI 回复
+     */
     async getDeepSeekResponse(tweetContent, retryCount = 0) {
         try {
             if (retryCount >= this.commonConfig.maxRetries) {
                 throw new Error('超过最大重试次数');
             }
 
-            console.log(`🤖 [${this.config.name}] 正在为推文生成 AI 回复:`, tweetContent);
+            this.logger.info('正在生成 AI 回复:', tweetContent);
+
             const response = await axios.post('https://api.deepseek.com/v1/chat/completions', {
                 model: "deepseek-chat",
-                messages: [{
-                    role: "user",
-                    content: `${this.config.prompt}
-                             
-                             Tweet to respond to: "${tweetContent}"
-                             
-                             Guidelines:
-                             - Stay under 280 characters
-                             - Match the tweet's language (Chinese/English)
-                             - Make it engaging and shareable`
-                }],
+                messages: [{ role: "user", content: this.buildPrompt(tweetContent) }],
                 max_tokens: 150,
                 temperature: 0.7
             }, {
-                headers: {
-                    'Authorization': `Bearer ${this.commonConfig.apiKeys.deepseek}`,
-                    'Content-Type': 'application/json'
-                },
+                headers: this.getHeaders(),
                 timeout: 10000
             });
 
             const aiResponse = response.data.choices[0].message.content;
-            console.log(`✨ [${this.config.name}] AI 回复生成成功:`, aiResponse);
+            this.logger.success('AI 回复生成成功:', aiResponse);
             return aiResponse;
 
         } catch (error) {
-            console.error(`❌ [${this.config.name}] DeepSeek API 错误 (尝试 ${retryCount + 1}/${this.commonConfig.maxRetries}):`, error.message);
-
-            if (error.response?.status === 429 || error.code === 'ECONNRESET') {
-                await new Promise(resolve => setTimeout(resolve, this.commonConfig.retryDelay));
-                return this.getDeepSeekResponse(tweetContent, retryCount + 1);
-            }
-
-            throw error;
+            return await this.handleApiError(error, retryCount, tweetContent);
         }
     }
 
+    /**
+     * 构建 AI 提示词
+     */
+    buildPrompt(tweetContent) {
+        return `${this.config.prompt}\n\nTweet to respond to: "${tweetContent}"\n\nGuidelines:\n- Stay under 280 characters\n- Match the tweet's language (Chinese/English)\n- Make it engaging and shareable`;
+    }
+
+    /**
+     * 获取 API 请求头
+     */
+    getHeaders() {
+        return {
+            'Authorization': `Bearer ${this.commonConfig.apiKeys.deepseek}`,
+            'Content-Type': 'application/json'
+        };
+    }
+
+    /**
+     * 处理 API 错误
+     */
+    async handleApiError(error, retryCount, tweetContent) {
+        this.logger.error(`API 错误 (尝试 ${retryCount + 1}/${this.commonConfig.maxRetries}):`, error.message);
+
+        if (this.shouldRetry(error) && retryCount < this.commonConfig.maxRetries) {
+            await this.delay(this.commonConfig.retryDelay);
+            return this.getDeepSeekResponse(tweetContent, retryCount + 1);
+        }
+
+        throw error;
+    }
+
+    /**
+     * 判断是否需要重试
+     */
+    shouldRetry(error) {
+        return error.response?.status === 429 || error.code === 'ECONNRESET';
+    }
+
+    /**
+     * 延迟执行
+     */
+    async delay(ms) {
+        await new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * 随机延迟
+     */
+    async randomDelay() {
+        const delay = Math.floor(
+            Math.random() * (this.config.maxDelay - this.config.minDelay + 1) +
+            this.config.minDelay
+        );
+        this.logger.wait(`等待 ${delay} 秒后回复...`);
+        await this.delay(delay * 1000);
+    }
+
+    /**
+     * 处理单条推文
+     */
+    async processTweet(tweetData) {
+        try {
+            // 检查是否已处理过
+            if (this.processedTweets.has(tweetData.tweet_id)) {
+                this.logger.info(`跳过已处理的推文: ${tweetData.tweet_id}`);
+                return;
+            }
+
+            this.logger.info(`开始处理推文: ${tweetData.tweet_id}`);
+            this.logger.info(`推文内容: ${tweetData.tweet_content}`);
+
+            // 验证推文
+            if (!this.isValidTweet(tweetData)) {
+                throw new Error('推文内容无效');
+            }
+
+            // 生成回复
+            const aiResponse = await this.getDeepSeekResponse(tweetData.tweet_content);
+            if (!aiResponse) {
+                throw new Error('生成 AI 回复失败');
+            }
+
+            // 随机延迟后发送
+            await this.randomDelay();
+            await this.sendTweet(aiResponse, tweetData.tweet_id);
+
+            // 记录处理状态
+            this.processedTweets.add(tweetData.tweet_id);
+            this.cleanupProcessedTweets();
+
+            return this.buildResponseData(tweetData, aiResponse, true);
+
+        } catch (error) {
+            this.logger.error('处理推文失败:', error);
+            return this.buildResponseData(tweetData, error.message, false);
+        }
+    }
+
+    /**
+     * 验证推文有效性
+     */
+    isValidTweet(tweetData) {
+        return tweetData.tweet_content && tweetData.tweet_content.trim().length > 0;
+    }
+
+    /**
+     * 清理已处理推文记录
+     */
+    cleanupProcessedTweets() {
+        if (this.processedTweets.size > 1000) {
+            const iterator = this.processedTweets.values();
+            for (let i = 0; i < 100; i++) {
+                this.processedTweets.delete(iterator.next().value);
+            }
+            this.logger.info('已清理部分历史记录');
+        }
+    }
+
+    /**
+     * 构建响应数据
+     */
+    buildResponseData(tweetData, aiResponse, isReplied) {
+        return {
+            timestamp: new Date().toISOString(),
+            accountName: this.config.name,
+            tweetId: tweetData.tweet_id,
+            tweetContent: tweetData.tweet_content,
+            aiResponse,
+            isReplied
+        };
+    }
+
+    /**
+     * 发送推文
+     */
     async sendTweet(text, replyToId = null, retryCount = 0) {
         try {
             if (retryCount >= this.commonConfig.maxRetries) {
                 throw new Error('超过最大重试次数');
             }
 
+            this.logger.info('准备发送推文回复');
             const tweetEndpoint = 'https://api2.apidance.pro/graphql/CreateTweet';
+
             const payload = {
                 variables: {
                     tweet_text: text,
@@ -96,13 +237,14 @@ class TwitterAccount {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
 
+            this.logger.success('推文发送成功');
             return await response.text();
 
         } catch (error) {
-            console.error(`❌ [${this.config.name}] Tweet error (尝试 ${retryCount + 1}/${this.commonConfig.maxRetries}):`, error);
+            this.logger.error(`发送推文失败 (尝试 ${retryCount + 1}/${this.commonConfig.maxRetries}):`, error);
 
-            if (error.response?.status === 429 || error.code === 'ECONNRESET') {
-                await new Promise(resolve => setTimeout(resolve, this.commonConfig.retryDelay));
+            if (this.shouldRetry(error)) {
+                await this.delay(this.commonConfig.retryDelay);
                 return this.sendTweet(text, replyToId, retryCount + 1);
             }
 
@@ -110,67 +252,25 @@ class TwitterAccount {
         }
     }
 
-    async randomDelay() {
-        const delay = Math.floor(
-            Math.random() * (this.config.maxDelay - this.config.minDelay + 1) +
-            this.config.minDelay
-        );
-        console.log(`⏳ [${this.config.name}] 等待 ${delay} 秒后回复...`);
-        await new Promise(resolve => setTimeout(resolve, delay * 1000));
-    }
+    /**
+     * 保存推文数据到 CSV
+     */
+    saveTweetData(data) {
+        const escapeCsv = (text) => {
+            if (typeof text !== 'string') return text;
+            if (text.includes(',') || text.includes('\n') || text.includes('"')) {
+                return `"${text.replace(/"/g, '""')}"`;
+            }
+            return text;
+        };
 
-    async processTweet(tweetData) {
+        const csvLine = `${data.timestamp},${data.accountName},${data.tweetId},${escapeCsv(data.tweetContent)},${escapeCsv(data.aiResponse)},${data.isReplied}\n`;
+
         try {
-            if (this.processedTweets.has(tweetData.tweet_id)) {
-                console.log(`⏭️ [${this.config.name}] 跳过已处理的推文: ${tweetData.tweet_id}`);
-                return;
-            }
-
-            console.log(`\n📝 [${this.config.name}] 处理推文: ${tweetData.tweet_id}`);
-            console.log(`内容: ${tweetData.tweet_content}`);
-
-            if (!tweetData.tweet_content || tweetData.tweet_content.trim().length === 0) {
-                throw new Error('推文内容为空');
-            }
-
-            const aiResponse = await this.getDeepSeekResponse(tweetData.tweet_content);
-            if (!aiResponse) {
-                throw new Error('生成 AI 回复失败');
-            }
-
-            await this.randomDelay();
-
-            await this.sendTweet(aiResponse, tweetData.tweet_id);
-            console.log(`✅ [${this.config.name}] 回复发送成功`);
-
-            this.processedTweets.add(tweetData.tweet_id);
-
-            if (this.processedTweets.size > 1000) {
-                const iterator = this.processedTweets.values();
-                for (let i = 0; i < 100; i++) {
-                    this.processedTweets.delete(iterator.next().value);
-                }
-            }
-
-            return {
-                timestamp: new Date().toISOString(),
-                accountName: this.config.name,
-                tweetId: tweetData.tweet_id,
-                tweetContent: tweetData.tweet_content,
-                aiResponse,
-                isReplied: true
-            };
-
+            fs.appendFileSync(this.csvPath, csvLine);
+            this.logger.success('数据已保存到CSV');
         } catch (error) {
-            console.error(`❌ [${this.config.name}] 处理推文失败:`, error);
-            return {
-                timestamp: new Date().toISOString(),
-                accountName: this.config.name,
-                tweetId: tweetData.tweet_id,
-                tweetContent: tweetData.tweet_content,
-                aiResponse: error.message,
-                isReplied: false
-            };
+            this.logger.error('保存数据失败:', error);
         }
     }
 }
@@ -179,27 +279,25 @@ class TwitterReplyBot {
     constructor() {
         console.log('🤖 初始化 Twitter Reply Bot...');
         this.loadConfig();
-        this.initAccounts();
         this.initCsvFile();
+        this.initAccounts();
         this.initWebhook();
     }
 
     loadConfig() {
-        const configPath = path.join(__dirname, 'config', 'accounts.json');
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        this.config = config;
-    }
-
-    initAccounts() {
-        this.accounts = this.config.accounts.map(accountConfig =>
-            new TwitterAccount(accountConfig, this.config.common)
-        );
+        try {
+            const configPath = path.join(__dirname, 'config', 'accounts.json');
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            this.config = config;
+        } catch (error) {
+            console.error('❌ 加载配置文件失败:', error);
+            process.exit(1);
+        }
     }
 
     initCsvFile() {
-        const csvHeader = 'timestamp,account_name,tweet_id,tweet_content,ai_response,is_replied\n';
-        const dataDir = './data';
-        this.csvPath = `${dataDir}/twitter_replies.csv`;
+        const dataDir = path.join(__dirname, 'data');
+        this.csvPath = path.join(dataDir, 'twitter_replies.csv');
 
         try {
             if (!fs.existsSync(dataDir)) {
@@ -207,29 +305,20 @@ class TwitterReplyBot {
             }
 
             if (!fs.existsSync(this.csvPath)) {
-                fs.writeFileSync(this.csvPath, csvHeader);
-                console.log('✅ CSV文件初始化成功');
+                const header = 'timestamp,accountName,tweetId,tweetContent,aiResponse,isReplied\n';
+                fs.writeFileSync(this.csvPath, header);
             }
+            console.log('✅ CSV文件初始化成功');
         } catch (error) {
             console.error('❌ CSV文件初始化失败:', error);
             process.exit(1);
         }
     }
 
-    saveTweetData(data) {
-        const escapeCsv = (text) => {
-            if (typeof text !== 'string') return text;
-            return `"${text.replace(/"/g, '""')}"`;
-        };
-
-        const csvLine = `${data.timestamp},${data.accountName},${data.tweetId},${escapeCsv(data.tweetContent)},${escapeCsv(data.aiResponse)},${data.isReplied}\n`;
-
-        try {
-            fs.appendFileSync(this.csvPath, csvLine);
-            console.log(`✅ [${data.accountName}] 数据已保存到CSV`);
-        } catch (error) {
-            console.error(`❌ [${data.accountName}] 保存数据失败:`, error);
-        }
+    initAccounts() {
+        this.accounts = this.config.accounts.map(accountConfig =>
+            new TwitterAccount(accountConfig, this.config.common, this.csvPath)
+        );
     }
 
     initWebhook() {
@@ -239,7 +328,10 @@ class TwitterReplyBot {
         app.post('/webhook/twitter', async (req, res) => {
             try {
                 console.log("=== 收到新的 Webhook 请求 ===");
-                console.log("请求数据:", JSON.stringify(req.body, null, 2));
+
+                if (!req.body?.tweet?.text) {
+                    throw new Error('无效的推文数据');
+                }
 
                 const tweetData = {
                     tweet_id: req.body.tweet.tweet_id,
@@ -254,7 +346,11 @@ class TwitterReplyBot {
                 // 保存所有账号的处理结果
                 results.forEach(result => {
                     if (result) {
-                        this.saveTweetData(result);
+                        // 使用账号实例的 saveTweetData 方法
+                        const account = this.accounts.find(acc => acc.config.name === result.accountName);
+                        if (account) {
+                            account.saveTweetData(result);
+                        }
                     }
                 });
 
