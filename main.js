@@ -1,21 +1,44 @@
+/**
+ * Twitter Reply Bot
+ * 一个自动回复 Twitter 推文的机器人系统
+ * 
+ * 功能特点:
+ * - 支持多账号并行处理
+ * - AI 驱动的智能回复
+ * - Webhook 接口接收推文
+ * - CSV 数据持久化
+ * - 错误重试机制
+ */
+
 require('dotenv').config();
 const fetch = require('node-fetch');
-const axios = require('axios');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const OpenAI = require('openai');
 
 /**
- * Twitter Account Class
- * 处理单个 Twitter 账号的所有操作，包括 AI 回复生成和推文发送
+ * TwitterAccount 类
+ * 处理单个 Twitter 账号的所有操作
  */
 class TwitterAccount {
+    /**
+     * @param {Object} config - 账号配置
+     * @param {Object} commonConfig - 通用配置
+     * @param {string} csvPath - CSV 文件路径
+     */
     constructor(config, commonConfig, csvPath) {
         this.config = config;
         this.commonConfig = commonConfig;
         this.csvPath = csvPath;
-        this.processedTweets = new Set();
+        this.processedTweets = new Set();  // 已处理推文的缓存
         this.logger = this.initLogger();
+
+        // 初始化 DeepSeek API 客户端
+        this.openai = new OpenAI({
+            baseURL: 'https://api.deepseek.com/v1',
+            apiKey: this.commonConfig.apiKeys.deepseek
+        });
 
         this.logger.info('账号初始化完成');
     }
@@ -42,11 +65,11 @@ class TwitterAccount {
         return [
             {
                 role: "system",
-                content: this.config.prompts.system
+                content: this.config.prompt
             },
             {
                 role: "user",
-                content: `${this.config.prompts.user}\n\n推文内容: "${tweetContent}"`
+                content: `"${tweetContent}"`
             }
         ];
     }
@@ -62,33 +85,21 @@ class TwitterAccount {
 
             this.logger.info('正在生成 AI 回复:', tweetContent);
 
-            const response = await axios.post('https://api.deepseek.com/v1/chat/completions', {
-                model: "deepseek-chat",
+            const completion = await this.openai.chat.completions.create({
+                model: "deepseek-reasoner",
                 messages: this.buildPrompt(tweetContent),
                 max_tokens: 150,
-                temperature: 0.7
-            }, {
-                headers: this.getHeaders(),
-                timeout: 10000
+                temperature: 1.3,
+                stream: false
             });
 
-            const aiResponse = response.data.choices[0].message.content;
+            const aiResponse = completion.choices[0].message.content;
             this.logger.success('AI 回复生成成功:', aiResponse);
             return aiResponse;
 
         } catch (error) {
             return await this.handleApiError(error, retryCount, tweetContent);
         }
-    }
-
-    /**
-     * 获取 API 请求头
-     */
-    getHeaders() {
-        return {
-            'Authorization': `Bearer ${this.commonConfig.apiKeys.deepseek}`,
-            'Content-Type': 'application/json'
-        };
     }
 
     /**
@@ -207,7 +218,11 @@ class TwitterAccount {
     }
 
     /**
-     * 发送推文
+     * 发送推文到 Twitter
+     * @param {string} text - 回复内容
+     * @param {string} replyToId - 被回复推文的 ID
+     * @param {number} retryCount - 当前重试次数
+     * @returns {Promise<string>} - API 响应
      */
     async sendTweet(text, replyToId = null, retryCount = 0) {
         try {
@@ -217,49 +232,80 @@ class TwitterAccount {
 
             this.logger.info('准备发送推文回复');
             const tweetEndpoint = 'https://api2.apidance.pro/graphql/CreateTweet';
-            const payload = {
-                variables: {
-                    tweet_text: text,
-                    dark_request: false,
-                    semantic_annotation_ids: []
-                }
-            };
 
-            if (replyToId) {
-                payload.variables.reply = {
-                    in_reply_to_tweet_id: replyToId,
-                    exclude_reply_user_ids: []
-                };
-            }
+            // 构建请求负载
+            const payload = this._buildTweetPayload(text, replyToId);
 
-            const response = await fetch(tweetEndpoint, {
-                method: 'POST',
-                headers: {
-                    'apikey': this.commonConfig.apiKeys.apidance,
-                    'AuthToken': this.config.authToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(payload),
-                timeout: 10000
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
+            // 发送请求
+            const response = await this._sendTweetRequest(tweetEndpoint, payload);
 
             this.logger.success('推文发送成功');
             return await response.text();
 
         } catch (error) {
-            this.logger.error(`发送推文失败 (尝试 ${retryCount + 1}/${this.commonConfig.maxRetries}):`, error);
-
-            if (this.shouldRetry(error)) {
-                await this.delay(this.commonConfig.retryDelay);
-                return this.sendTweet(text, replyToId, retryCount + 1);
-            }
-
-            throw error;
+            return await this._handleSendTweetError(error, text, replyToId, retryCount);
         }
+    }
+
+    /**
+     * 构建推文请求负载
+     * @private
+     */
+    _buildTweetPayload(text, replyToId) {
+        const payload = {
+            variables: {
+                tweet_text: text,
+                dark_request: false,
+                semantic_annotation_ids: []
+            }
+        };
+
+        if (replyToId) {
+            payload.variables.reply = {
+                in_reply_to_tweet_id: replyToId,
+                exclude_reply_user_ids: []
+            };
+        }
+
+        return payload;
+    }
+
+    /**
+     * 发送推文请求
+     * @private
+     */
+    async _sendTweetRequest(endpoint, payload) {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'apikey': this.commonConfig.apiKeys.apidance,
+                'AuthToken': this.config.authToken,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload),
+            timeout: 10000
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        return response;
+    }
+
+    /**
+     * 处理发送推文错误
+     * @private
+     */
+    async _handleSendTweetError(error, text, replyToId, retryCount) {
+        this.logger.error(`发送推文失败 (尝试 ${retryCount + 1}/${this.commonConfig.maxRetries}):`, error);
+
+        if (this.shouldRetry(error)) {
+            await this.delay(this.commonConfig.retryDelay);
+            return this.sendTweet(text, replyToId, retryCount + 1);
+        }
+
+        throw error;
     }
 
     /**
@@ -285,9 +331,21 @@ class TwitterAccount {
     }
 }
 
+/**
+ * TwitterReplyBot 类
+ * 管理整个机器人系统
+ */
 class TwitterReplyBot {
     constructor() {
         console.log('🤖 初始化 Twitter Reply Bot...');
+        this._init();
+    }
+
+    /**
+     * 初始化所有组件
+     * @private
+     */
+    _init() {
         this.loadConfig();
         this.initCsvFile();
         this.initAccounts();
@@ -395,7 +453,7 @@ class TwitterReplyBot {
     }
 }
 
-// Start the bot
+// 启动机器人
 console.log('🤖 Twitter Reply Bot Starting...');
 const bot = new TwitterReplyBot();
 bot.start().catch(error => {
