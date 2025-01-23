@@ -155,7 +155,7 @@ class TwitterAccount {
         }
 
         // 检查推文长度是否满足最小要求
-        const minLength = 20;
+        const minLength = 66;
         if (tweetData.tweet_content.trim().length < minLength) {
             this.logger.info(`推文内容少于${minLength}个字符，跳过处理`);
             return false;
