@@ -34,6 +34,24 @@ class TwitterAccount {
     }
 
     /**
+     * 构建 AI 提示词
+     * @param {string} tweetContent - 需要回复的推文内容
+     * @returns {Array} - 包含 system 和 user 提示词的消息数组
+     */
+    buildPrompt(tweetContent) {
+        return [
+            {
+                role: "system",
+                content: this.config.prompts.system
+            },
+            {
+                role: "user",
+                content: `${this.config.prompts.user}\n\n推文内容: "${tweetContent}"`
+            }
+        ];
+    }
+
+    /**
      * 生成 AI 回复
      */
     async getDeepSeekResponse(tweetContent, retryCount = 0) {
@@ -46,7 +64,7 @@ class TwitterAccount {
 
             const response = await axios.post('https://api.deepseek.com/v1/chat/completions', {
                 model: "deepseek-chat",
-                messages: [{ role: "user", content: this.buildPrompt(tweetContent) }],
+                messages: this.buildPrompt(tweetContent),
                 max_tokens: 150,
                 temperature: 0.7
             }, {
@@ -61,13 +79,6 @@ class TwitterAccount {
         } catch (error) {
             return await this.handleApiError(error, retryCount, tweetContent);
         }
-    }
-
-    /**
-     * 构建 AI 提示词
-     */
-    buildPrompt(tweetContent) {
-        return `${this.config.prompt}\n\nTweet to respond to: "${tweetContent}"\n\nGuidelines:\n- Stay under 280 characters\n- Match the tweet's language (Chinese/English)\n- Make it engaging and shareable`;
     }
 
     /**
@@ -206,7 +217,6 @@ class TwitterAccount {
 
             this.logger.info('准备发送推文回复');
             const tweetEndpoint = 'https://api2.apidance.pro/graphql/CreateTweet';
-
             const payload = {
                 variables: {
                     tweet_text: text,
