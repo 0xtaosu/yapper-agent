@@ -143,6 +143,28 @@ class TwitterAccount {
     }
 
     /**
+     * 验证推文有效性
+     * @param {Object} tweetData - 推文数据
+     * @returns {boolean} - 是否有效
+     */
+    isValidTweet(tweetData) {
+        // 检查推文内容是否存在且不为空
+        if (!tweetData.tweet_content || !tweetData.tweet_content.trim()) {
+            this.logger.info('推文内容为空，跳过处理');
+            return false;
+        }
+
+        // 检查推文长度是否满足最小要求
+        const minLength = 20;
+        if (tweetData.tweet_content.trim().length < minLength) {
+            this.logger.info(`推文内容少于${minLength}个字符，跳过处理`);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
      * 处理单条推文
      */
     async processTweet(tweetData) {
@@ -158,7 +180,7 @@ class TwitterAccount {
 
             // 验证推文
             if (!this.isValidTweet(tweetData)) {
-                throw new Error('推文内容无效');
+                return this.buildResponseData(tweetData, '推文内容无效', false);
             }
 
             // 生成回复
@@ -181,13 +203,6 @@ class TwitterAccount {
             this.logger.error('处理推文失败:', error);
             return this.buildResponseData(tweetData, error.message, false);
         }
-    }
-
-    /**
-     * 验证推文有效性
-     */
-    isValidTweet(tweetData) {
-        return tweetData.tweet_content && tweetData.tweet_content.trim().length > 0;
     }
 
     /**
