@@ -4,13 +4,14 @@
 
 ## 功能特点
 
-- 通过 Webhook 接收实时推文更新
-- 使用 DeepSeek API 生成加密货币领域的专业回复
-- 支持加密货币俚语和专业术语
-- 智能匹配中英文回复
-- 自动记录处理状态到 CSV 文件
-- 防重复回复机制
-- 完善的错误处理和日志记录
+- 多账号并行处理推文回复
+- 基于 DeepSeek API 的智能回复生成
+- Webhook 接口实时接收推文
+- CSV 数据持久化存储
+- 完善的错误重试机制
+- 智能推文过滤（少于66字符自动跳过）
+- 防重复回复机制（缓存最近1000条）
+- 中英文自动匹配回复
 
 ## AI 回复特色
 
@@ -24,9 +25,9 @@
 ## 前置要求
 
 - Node.js (v14.0.0 或更高版本)
-- Twitter 账号
-- DeepSeek API 密钥
 - 可访问的服务器（用于接收 Webhook）
+- DeepSeek API 密钥
+- APIance API 密钥
 
 ## 安装
 
@@ -43,21 +44,18 @@ cd tao-ct-agent
 npm install
 ```
 
-3. 配置环境变量：
-   - 复制 `.env.example` 到 `.env`
-   - 填写必要的配置信息：
-     - `DEEPSEEK_API_KEY`: DeepSeek API 密钥
-     - `APIDANCE_API_KEY`: APIance API 密钥
-     - `TWITTER_AUTH_TOKEN`: Twitter 认证令牌
-     - `PORT`: Webhook 服务器端口（默认 5000）
+3. 配置账号信息：
+   在 `config/accounts.json` 中配置：
+   - 账号名称和认证令牌
+   - AI 提示词设置
+   - 回复延迟范围
+   - API 密钥
 
-## 使用方法
-
-1. 确保所有配置都已正确设置
-2. 运行机器人：
+## 启动服务
 
 ```bash
-node main.js
+chmod +x start.sh
+./start.sh
 ```
 
 ## 工作原理
@@ -72,12 +70,13 @@ node main.js
 
 ## 数据存储
 
-所有推文处理记录都保存在 `./data/twitter_replies.csv` 文件中，包含以下字段：
+所有推文处理记录保存在 `data/twitter_replies.csv` 文件中，包含以下字段：
 - timestamp: 处理时间
-- tweet_id: 推文 ID
-- tweet_content: 推文内容
-- ai_response: AI 生成的回复
-- is_replied: 是否成功回复
+- accountName: 处理账号
+- tweetId: 推文ID
+- tweetContent: 推文内容
+- aiResponse: AI回复内容
+- isReplied: 是否成功回复
 
 ## 项目结构
 ```
@@ -91,23 +90,25 @@ node main.js
 └── package.json
 ```
 
-## 注意事项
-
-- 确保服务器能够接收外部 Webhook 请求
-- 推荐使用 PM2 等工具保持程序运行
-- 定期检查 CSV 文件确保数据正常记录
-- 注意 API 使用限制和成本
-- 遵守 Twitter 的使用规范
-
 ## 错误处理
 
-- 所有错误都会记录到控制台
-- 处理失败的推文也会记录到 CSV 文件
-- 程序会自动跳过已处理的推文
+- API 调用失败自动重试（最多3次）
+- 推文长度过滤（<66字符自动跳过）
+- 重复推文检测（缓存最近1000条）
+- 详细的错误日志记录
 
-## 贡献
+## 日志记录
 
-欢迎提交 Issues 和 Pull Requests 来改进这个项目。
+- 运行日志位于 `logs/` 目录
+- 使用时间戳命名的日志文件
+- 包含详细的处理状态和错误信息
+
+## 注意事项
+
+- 定期检查 CSV 文件确保数据正常记录
+- 监控 API 使用限制和成本
+- 确保服务器能够接收外部 Webhook 请求
+- 推荐使用 PM2 等工具保持程序运行
 
 ## 许可证
 
@@ -116,3 +117,4 @@ node main.js
 ## 致谢
 
 - [DeepSeek API](https://www.deepseek.com/)
+- [APIance](https://apidance.pro/)
