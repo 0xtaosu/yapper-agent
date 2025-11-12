@@ -1,4 +1,4 @@
-# TAO CT Agent
+# Yapper Agent
 
 一个专注于加密货币领域的 Twitter AI 互动机器人，基于 Node.js 开发，使用 DeepSeek API 生成智能、幽默的回复内容。
 
